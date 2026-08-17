@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#02030a">
+  <meta name="description" content="별의 생애와 온도에서 영감을 받은 인터랙티브 우주 배경">
+  <title>별이 숨 쉬는 우주</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      background: #02030a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 42%, #080d1f 0%, #030511 40%, #02030a 72%);
+    }
+
+    body {
+      min-height: 100dvh;
+      overscroll-behavior: none;
+      touch-action: manipulation;
+    }
+
+    canvas {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+  </style>
+</head>
+<body>
+  <canvas id="universe"></canvas>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const CONFIG = Object.freeze({
+        starsPerMegapixel: 737,
+        minStars: 405,
+        maxStars: 1517,
+        maxDpr: 2,
+        resizeDelay: 140
+      });
+
+      // 색은 항성의 표면 온도와 진화 단계에서 가져오되, 시각적 균형을 위해 분포를 조정했다.
+      const STAR_TYPES = Object.freeze([
+        { name: 'blue',       rgb: '186, 213, 255', glow: '125, 176, 255', weight: 0.04, size: 0.92, energy: 1.10 },
+        { name: 'blue-white', rgb: '224, 237, 255', glow: '166, 205, 255', weight: 0.16, size: 0.84, energy: 1.05 },
+        { name: 'white',      rgb: '250, 252, 255', glow: '220, 234, 255', weight: 0.495, size: 0.72, energy: 1.00 },
+        { name: 'yellow',     rgb: '255, 244, 210', glow: '255, 220, 153', weight: 0.16, size: 0.74, energy: 0.95 },
+        { name: 'orange',     rgb: '255, 210, 165', glow: '255, 164, 105', weight: 0.09, size: 0.82, energy: 0.90 },
+        { name: 'red-giant',  rgb: '255, 170, 145', glow: '255, 98, 77',   weight: 0.015, size: 1.08, energy: 0.78 },
+        { name: 'white-dwarf',rgb: '235, 247, 255', glow: '183, 224, 255', weight: 0.04, size: 0.50, energy: 1.18 }
+      ]);
+
+      const canvas = document.getElementById('universe');
+      const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+      const starSprites = new Map();
+
+      if (!ctx) return;
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let stars = [];
+      let animationId = 0;
+      let lastTime = 0;
+      let resizeTimer = 0;
+
+      function random(min, max) {
+        return min + Math.random() * (max - min);
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function pickStarType() {
+        let choice = Math.random();
+        for (let index = 0; index < STAR_TYPES.length; index += 1) {
+          choice -= STAR_TYPES[index].weight;
+          if (choice <= 0) return STAR_TYPES[index];
+        }
+        return STAR_TYPES[2];
+      }
+
+      function getStarSprite(type) {
+        if (starSprites.has(type.name)) return starSprites.get(type.name);
+
+        const sprite = document.createElement('canvas');
+        const size = 64;
+        const center = size * 0.5;
+        const spriteCtx = sprite.getContext('2d');
+        sprite.width = size;
+        sprite.height = size;
+
+        const glow = spriteCtx.createRadialGradient(center, center, 0, center, center, center);
+        glow.addColorStop(0, `rgba(${type.rgb}, 1)`);
+        glow.addColorStop(0.08, `rgba(${type.rgb}, 0.94)`);
+        glow.addColorStop(0.22, `rgba(${type.glow}, 0.34)`);
+        glow.addColorStop(0.52, `rgba(${type.glow}, 0.11)`);
+        glow.addColorStop(0.78, `rgba(${type.glow}, 0.035)`);
+        glow.addColorStop(1, `rgba(${type.glow}, 0)`);
+        spriteCtx.fillStyle = glow;
+        spriteCtx.fillRect(0, 0, size, size);
+        starSprites.set(type.name, sprite);
+        return sprite;
+      }
+
+      function createStar(normalizedX = Math.random(), normalizedY = Math.random()) {
+        const type = pickStarType();
+        const depth = random(0.18, 1);
+        const rarityBoost = Math.pow(Math.random(), 7) * 0.82;
+        const baseSize = (random(0.28, 0.82) + rarityBoost) * type.size * (0.72 + depth * 0.38);
+
+        return {
+          nx: normalizedX,
+          ny: normalizedY,
+          x: normalizedX * width,
+          y: normalizedY * height,
+          depth,
+          size: baseSize,
+          baseAlpha: random(0.22, 0.70) * type.energy,
+          twinkleAmount: random(0.20, 0.34),
+          twinkleSpeed: random(0.0009, 0.0013),
+          phase: random(0, Math.PI * 2),
+          driftPhase: random(0, Math.PI * 2),
+          rgb: type.rgb,
+          glow: type.glow,
+          sprite: getStarSprite(type),
+          spike: false,
+          spikeEligible: type.name !== 'red-giant',
+          spikeAngle: Math.random() < 0.5 ? 0 : Math.PI * 0.25,
+          spikeLength: random(6.5, 9.5)
+        };
+      }
+
+      function targetStarCount() {
+        const megapixels = (width * height) / 1_000_000;
+        return Math.round(clamp(
+          megapixels * CONFIG.starsPerMegapixel,
+          CONFIG.minStars,
+          CONFIG.maxStars
+        ));
+      }
+
+      function reconcileStars() {
+        const target = targetStarCount();
+        if (stars.length < target) {
+          while (stars.length < target) stars.push(createStar());
+        } else if (stars.length > target) {
+          stars.length = target;
+        }
+
+        for (let index = 0; index < stars.length; index += 1) {
+          const star = stars[index];
+          star.x = star.nx * width;
+          star.y = star.ny * height;
+          star.spike = false;
+        }
+
+        const spikeCount = Math.round(clamp(stars.length / 120, 7, 18));
+        const brightestStars = stars
+          .filter((star) => star.spikeEligible)
+          .sort((a, b) => (b.size * b.baseAlpha) - (a.size * a.baseAlpha));
+        for (let index = 0; index < Math.min(spikeCount, brightestStars.length); index += 1) {
+          brightestStars[index].spike = true;
+        }
+      }
+
+      function resize() {
+        const nextWidth = Math.max(1, window.innerWidth);
+        const nextHeight = Math.max(1, window.innerHeight);
+        dpr = Math.min(window.devicePixelRatio || 1, CONFIG.maxDpr);
+        width = nextWidth;
+        height = nextHeight;
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        reconcileStars();
+        draw(performance.now());
+      }
+
+      function drawStar(star, time) {
+        const wave = Math.sin(time * star.twinkleSpeed + star.phase);
+        const pulse = 0.5 + wave * 0.5;
+        const lightLevel = pulse * pulse * (3 - 2 * pulse);
+        let alpha = star.baseAlpha * (0.30 + lightLevel * 0.74);
+        let glowAlpha = (0.001 + lightLevel * (0.637 + star.twinkleAmount)) * (0.58 + star.baseAlpha * 0.64);
+        let scale = 0.94 + lightLevel * 0.075;
+        let glowScale = 0.24 + lightLevel * 1.16;
+
+        const drift = Math.sin(time * 0.00008 + star.driftPhase) * 0.45;
+        const x = star.x + drift * star.depth;
+        const y = star.y + drift * 0.35;
+
+        alpha = clamp(alpha, 0.08, 1);
+        glowAlpha = clamp(glowAlpha, 0.015, 1);
+        const radius = Math.max(0.35, star.size * scale);
+
+        const glowRadius = Math.max(3.2, radius * 7.2) * glowScale;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = glowAlpha * 0.58;
+        ctx.drawImage(
+          star.sprite,
+          x - glowRadius,
+          y - glowRadius,
+          glowRadius * 2,
+          glowRadius * 2
+        );
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+
+        ctx.fillStyle = `rgba(${star.rgb}, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (star.spike && lightLevel > 0.22) {
+          const spikeVisibility = (lightLevel - 0.22) / 0.78;
+          const longRay = radius * star.spikeLength * (0.82 + spikeVisibility * 0.28);
+          const shortRay = longRay * 0.8;
+          const cosA = Math.cos(star.spikeAngle);
+          const sinA = Math.sin(star.spikeAngle);
+          const cosB = -sinA;
+          const sinB = cosA;
+
+          ctx.strokeStyle = `rgba(${star.rgb}, ${spikeVisibility * glowAlpha * 0.34})`;
+          ctx.lineWidth = 0.58;
+          ctx.beginPath();
+          ctx.moveTo(x - cosA * longRay, y - sinA * longRay);
+          ctx.lineTo(x + cosA * longRay, y + sinA * longRay);
+          ctx.moveTo(x - cosB * shortRay, y - sinB * shortRay);
+          ctx.lineTo(x + cosB * shortRay, y + sinB * shortRay);
+          ctx.stroke();
+        }
+
+      }
+
+      function draw(time) {
+        ctx.clearRect(0, 0, width, height);
+
+        for (let index = 0; index < stars.length; index += 1) {
+          drawStar(stars[index], time);
+        }
+      }
+
+      function animate(time) {
+        const safeTime = lastTime && time - lastTime > 250 ? lastTime + 16.67 : time;
+        lastTime = safeTime;
+        draw(safeTime);
+        animationId = requestAnimationFrame(animate);
+      }
+
+      window.addEventListener('resize', () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(resize, CONFIG.resizeDelay);
+      }, { passive: true });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          cancelAnimationFrame(animationId);
+          animationId = 0;
+        } else if (!animationId) {
+          lastTime = 0;
+          animationId = requestAnimationFrame(animate);
+        }
+      });
+
+      resize();
+      animationId = requestAnimationFrame(animate);
+    })();
+  </script>
+</body>
+</html>
