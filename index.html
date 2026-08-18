@@ -76,7 +76,11 @@
       const RED_GIANT_CHANCE = 0.03;
 
       const canvas = document.getElementById('universe');
-      const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+      const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
+      const ctx = canvas.getContext('2d', {
+        alpha: true,
+        desynchronized: !isCoarsePointer
+      });
       const trailSprites = new Map();
 
       if (!ctx) return;
