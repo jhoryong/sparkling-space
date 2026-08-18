@@ -37,6 +37,7 @@
       display: block;
       width: 100%;
       height: 100%;
+      touch-action: pan-x pinch-zoom;
       -webkit-tap-highlight-color: transparent;
     }
 
@@ -92,6 +93,8 @@
       let targetScrollVelocity = 0;
       let scrollOffset = 0;
       let trailRatio = 1;
+      let touchY = 0;
+      let touchTime = 0;
 
       function random(min, max) {
         return min + Math.random() * (max - min);
@@ -388,6 +391,25 @@
           CONFIG.maxScrollSpeed
         );
       }, { passive: true });
+
+      canvas.addEventListener('pointerdown', (event) => {
+        if (event.pointerType !== 'touch') return;
+        touchY = event.clientY;
+        touchTime = event.timeStamp;
+        canvas.setPointerCapture(event.pointerId);
+      });
+
+      canvas.addEventListener('pointermove', (event) => {
+        if (event.pointerType !== 'touch' || !canvas.hasPointerCapture(event.pointerId)) return;
+        const elapsed = Math.max((event.timeStamp - touchTime) / 1000, 1 / 120);
+        targetScrollVelocity = clamp(
+          (event.clientY - touchY) / elapsed,
+          -CONFIG.maxScrollSpeed,
+          CONFIG.maxScrollSpeed
+        );
+        touchY = event.clientY;
+        touchTime = event.timeStamp;
+      });
 
       window.addEventListener('resize', () => {
         window.clearTimeout(resizeTimer);
