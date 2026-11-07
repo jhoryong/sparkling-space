@@ -41,10 +41,106 @@
       -webkit-tap-highlight-color: transparent;
     }
 
+    .travel-controls {
+      position: fixed;
+      right: max(16px, env(safe-area-inset-right));
+      bottom: max(16px, env(safe-area-inset-bottom));
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      color: #e4edff;
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+
+    .travel-button,
+    .direction-toggle,
+    .direction-panel {
+      border: 1px solid #b4d2ff40;
+      background: #0d1528e8;
+    }
+
+    .travel-button,
+    .direction-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 0 14px;
+      border-radius: 999px;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .travel-button[aria-pressed='true'] {
+      border-color: #a9d1ffb3;
+      box-shadow: 0 0 16px #77aaff38;
+    }
+
+    .direction-toggle::-webkit-details-marker { display: none; }
+    .travel-button:focus-visible,
+    .direction-toggle:focus-visible,
+    .direction-panel input:focus-visible { outline: 2px solid #b2d7ff; }
+
+    .direction-panel {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      display: grid;
+      gap: 12px;
+      width: min(260px, calc(100vw - 32px));
+      max-height: calc(100dvh - 80px - env(safe-area-inset-bottom));
+      overflow-y: auto;
+      padding: 14px;
+      border-radius: 14px;
+    }
+
+    .direction-axis {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 4px 10px;
+    }
+
+    .direction-axis input {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-height: 24px;
+      margin: 0;
+      accent-color: #a9d1ff;
+    }
+
+    .direction-axis .direction-value {
+      color: #a9c6ed;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
   <canvas id="universe"></canvas>
+  <div class="travel-controls">
+    <button class="travel-button" id="auto-travel" type="button" aria-pressed="false">
+      <span id="travel-icon" aria-hidden="true">▶</span> 자동 여행
+    </button>
+    <details>
+      <summary class="direction-toggle">방향 <span aria-hidden="true">⌃</span></summary>
+      <div class="direction-panel">
+        <label class="direction-axis" for="travel-x">
+          <span>X · 좌 / 우</span><span class="direction-value" id="travel-x-value" aria-hidden="true">0</span>
+          <input id="travel-x" type="range" min="-100" max="100" value="0">
+        </label>
+        <label class="direction-axis" for="travel-y">
+          <span>Y · 아래 / 위</span><span class="direction-value" id="travel-y-value" aria-hidden="true">100</span>
+          <input id="travel-y" type="range" min="-100" max="100" value="100">
+        </label>
+        <label class="direction-axis" for="travel-z">
+          <span>Z · 후진 / 전진</span><span class="direction-value" id="travel-z-value" aria-hidden="true">0</span>
+          <input id="travel-z" type="range" min="-100" max="100" value="0">
+        </label>
+      </div>
+    </details>
+  </div>
 
   <script>
     (() => {
@@ -60,6 +156,8 @@
         trailLengthFactor: 0.22,
         maxTrailLength: 280,
         trailSpeedThreshold: 4,
+        autoTravelSpeed: 220,
+        autoTravelDepthRate: 0.52,
         desktopIdleFps: 30,
         tabletIdleFps: 24,
         resizeDelay: 140
@@ -74,6 +172,8 @@
       ]);
       const RED_GIANT_COLOR = '255, 138, 112';
       const RED_GIANT_CHANCE = 0.03;
+      const NEAR_DEPTH = 0.45;
+      const FAR_DEPTH = 1.65;
 
       const canvas = document.getElementById('universe');
       const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
@@ -85,6 +185,19 @@
 
       if (!ctx) return;
 
+      const autoTravelButton = document.getElementById('auto-travel');
+      const travelIcon = document.getElementById('travel-icon');
+      const travelAxes = ['x', 'y', 'z'].map((axis) => ({
+        input: document.getElementById(`travel-${axis}`),
+        display: document.getElementById(`travel-${axis}-value`)
+      }));
+      let autoTravel = false;
+      let travelDirectionX = 0;
+      let travelDirectionY = 0;
+      let travelDirectionZ = 0;
+      let travelVelocityX = 0;
+      let travelVelocityY = 0;
+      let travelVelocityZ = 0;
       let width = 0;
       let height = 0;
       let dpr = 1;
@@ -95,7 +208,6 @@
       let resizeTimer = 0;
       let scrollVelocity = 0;
       let targetScrollVelocity = 0;
-      let scrollOffset = 0;
       let trailRatio = 1;
       let touchY = 0;
       let touchTime = 0;
@@ -149,14 +261,16 @@
           ? RED_GIANT_COLOR
           : STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)];
         const depth = random(0.18, 1);
+        const initialZ = FAR_DEPTH - depth * (FAR_DEPTH - NEAR_DEPTH);
         const baseSize = random(0.37, 0.92) * 1.2 * (0.72 + depth * 0.38);
 
         return {
           nx: normalizedX,
           ny: normalizedY,
-          x: normalizedX * width,
-          y: normalizedY * height,
           depth,
+          initialZ,
+          z: initialZ,
+          travelFade: 1,
           size: baseSize,
           twinkleDuration: random(2000, 3600),
           phase: random(0, Math.PI * 2),
@@ -169,8 +283,12 @@
           spikePriority: Math.random(),
           spikeAngle: Math.random() < 0.5 ? 0 : Math.PI * 0.25,
           spikeLength: random(2.5, 4),
+          renderX: 0,
           renderY: 0,
+          renderSize: 0,
           renderAlpha: 0,
+          renderTailX: 0,
+          renderTailY: 0,
           renderTrailLength: 0,
           renderTrailAlpha: 0,
         };
@@ -186,8 +304,6 @@
 
         for (let index = 0; index < stars.length; index += 1) {
           const star = stars[index];
-          star.x = star.nx * width;
-          star.y = star.ny * height;
           star.spike = false;
         }
 
@@ -233,43 +349,88 @@
         draw(lastDrawTime);
       }
 
-      function wrap(value, range) {
-        return ((value % range) + range) % range;
+      function wrapUnit(value) {
+        return value - Math.floor(value);
       }
 
-      function prepareStarFrame(star, time, speedAboveThreshold, speedRatio) {
+      function prepareStarFrame(star, time, deltaTime, motionX, motionY, motionZ, isMoving) {
         const lightLevel = Math.cos(
           time / star.twinkleDuration * Math.PI * 2 + star.phase
         ) * -0.5 + 0.5;
         const alpha = 0.1 + lightLevel * 0.9;
+        let velocityX = 0;
+        let starVelocityY = 0;
+        let sizeScale = clamp(star.initialZ / star.z, 0.55, 1.85);
+        star.travelFade = Math.min(1, star.travelFade + deltaTime * 3);
 
-        const trailLength = Math.min(
-          CONFIG.maxTrailLength,
-          speedAboveThreshold * CONFIG.trailLengthFactor * star.depth
-        );
+        if (isMoving) {
+          const nextZ = star.z - motionZ * deltaTime;
+          const perspective = star.z / Math.max(NEAR_DEPTH, nextZ);
+          const projectedX = perspective === 1 ? star.nx : 0.5 + (star.nx - 0.5) * perspective;
+          const projectedY = perspective === 1 ? star.ny : 0.5 + (star.ny - 0.5) * perspective;
+          const leavesViewport = motionZ > 0 &&
+            (projectedX < 0 || projectedX >= 1 || projectedY < 0 || projectedY >= 1);
 
-        star.renderY = wrap(star.y + scrollOffset * star.depth, height);
-        star.renderAlpha = alpha;
+          if (nextZ < NEAR_DEPTH || nextZ > FAR_DEPTH || leavesViewport) {
+            star.z = motionZ > 0 ? FAR_DEPTH : NEAR_DEPTH;
+            star.nx = Math.random();
+            star.ny = Math.random();
+            star.travelFade = 0;
+            sizeScale = clamp(star.initialZ / star.z, 0.55, 1.85);
+          } else {
+            star.z = nextZ;
+            sizeScale = clamp(star.initialZ / nextZ, 0.55, 1.85);
+            const lateralDepth = star.depth * sizeScale;
+            const nextX = projectedX + motionX * lateralDepth * deltaTime / width;
+            const nextY = projectedY + motionY * lateralDepth * deltaTime / height;
+            velocityX = (projectedX - star.nx) * width / deltaTime + motionX * lateralDepth;
+            starVelocityY = (projectedY - star.ny) * height / deltaTime + motionY * lateralDepth;
+            star.nx = wrapUnit(nextX);
+            star.ny = wrapUnit(nextY);
+          }
+        }
+
+        const depthRemaining = motionZ > 0 ? star.z - NEAR_DEPTH : FAR_DEPTH - star.z;
+        const fadeStrength = Math.min(1, Math.abs(motionZ) * 4);
+        const depthFade = 1 - fadeStrength * (1 - Math.min(1, depthRemaining / 0.12));
+        const speed = velocityX ? Math.hypot(velocityX, starVelocityY) : Math.abs(starVelocityY);
+        const speedAboveThreshold = Math.max(0, speed - CONFIG.trailSpeedThreshold * star.depth);
+        const trailLength = Math.min(CONFIG.maxTrailLength, speedAboveThreshold * CONFIG.trailLengthFactor);
+        const speedRatio = clamp(speedAboveThreshold / (CONFIG.maxScrollSpeed * star.depth), 0, 1);
+        star.renderX = star.nx * width;
+        star.renderY = star.ny * height;
+        star.renderSize = star.size * sizeScale;
+        star.renderAlpha = alpha * star.travelFade * depthFade;
         star.renderTrailLength = trailLength;
-        star.renderTrailAlpha = Math.sqrt(speedRatio) * (0.34 + alpha * 0.56);
+        star.renderTailX = speed ? -velocityX / speed : 0;
+        star.renderTailY = speed ? -starVelocityY / speed : 0;
+        star.renderTrailAlpha = Math.sqrt(speedRatio) * (0.34 + alpha * 0.56) * star.travelFade * depthFade;
       }
 
-      function drawTrailAt(star, y, movingUp) {
-        const trailWidth = Math.max(1.5, star.size * 2.6);
-        const trailY = movingUp ? y : y - star.renderTrailLength;
+      function drawTrailAt(star, x, y) {
+        const trailWidth = Math.max(1.5, star.renderSize * 2.6);
+        const tailX = star.renderTailX;
+        const tailY = star.renderTailY;
         ctx.globalAlpha = star.renderTrailAlpha;
-        ctx.drawImage(
-          movingUp ? star.trailDown : star.trailUp,
-          star.x - trailWidth * 0.5,
-          trailY,
-          trailWidth,
-          star.renderTrailLength
-        );
+        if (tailX === 0) {
+          const extendsDown = tailY > 0;
+          ctx.drawImage(
+            extendsDown ? star.trailDown : star.trailUp,
+            x - trailWidth * 0.5,
+            extendsDown ? y : y - star.renderTrailLength,
+            trailWidth,
+            star.renderTrailLength
+          );
+          return;
+        }
+        // The sprite's local +Y points from the star into its trail.
+        ctx.setTransform(tailY * dpr, -tailX * dpr, tailX * dpr, tailY * dpr, x * dpr, y * dpr);
+        ctx.drawImage(star.trailDown, -trailWidth * 0.5, 0, trailWidth, star.renderTrailLength);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
 
-      function drawCoreAt(star, y) {
-        const x = star.x;
-        const radius = star.size;
+      function drawCoreAt(star, x, y) {
+        const radius = star.renderSize;
         ctx.fillStyle = `rgba(${star.rgb}, ${star.renderAlpha})`;
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -296,19 +457,21 @@
       }
 
       function drawTrailPass() {
-        const movingUp = scrollVelocity < 0;
         ctx.globalCompositeOperation = 'lighter';
 
         for (let index = 0; index < stars.length; index += 1) {
           const star = stars[index];
           if (star.renderTrailLength <= 0 || star.trailRank > trailRatio) continue;
+          const x = star.renderX;
           const y = star.renderY;
-          drawTrailAt(star, y, movingUp);
-          if (y - star.renderTrailLength < 0) {
-            drawTrailAt(star, y + height, movingUp);
-          } else if (y + star.renderTrailLength > height) {
-            drawTrailAt(star, y - height, movingUp);
-          }
+          const endX = x + star.renderTailX * star.renderTrailLength;
+          const endY = y + star.renderTailY * star.renderTrailLength;
+          const wrapX = endX < 0 ? width : endX > width ? -width : 0;
+          const wrapY = endY < 0 ? height : endY > height ? -height : 0;
+          drawTrailAt(star, x, y);
+          if (wrapX) drawTrailAt(star, x + wrapX, y);
+          if (wrapY) drawTrailAt(star, x, y + wrapY);
+          if (wrapX && wrapY) drawTrailAt(star, x + wrapX, y + wrapY);
         }
         ctx.globalAlpha = 1;
       }
@@ -317,34 +480,30 @@
         ctx.globalCompositeOperation = 'source-over';
         for (let index = 0; index < stars.length; index += 1) {
           const star = stars[index];
+          const x = star.renderX;
           const y = star.renderY;
           const coreReach = star.spike
-            ? star.size * star.spikeLength
-            : star.size;
-          drawCoreAt(star, y);
-          if (y - coreReach < 0) {
-            drawCoreAt(star, y + height);
-          } else if (y + coreReach > height) {
-            drawCoreAt(star, y - height);
-          }
+            ? star.renderSize * star.spikeLength
+            : star.renderSize;
+          const wrapX = x - coreReach < 0 ? width : x + coreReach > width ? -width : 0;
+          const wrapY = y - coreReach < 0 ? height : y + coreReach > height ? -height : 0;
+          drawCoreAt(star, x, y);
+          if (wrapX) drawCoreAt(star, x + wrapX, y);
+          if (wrapY) drawCoreAt(star, x, y + wrapY);
+          if (wrapX && wrapY) drawCoreAt(star, x + wrapX, y + wrapY);
         }
       }
 
-      function draw(time) {
+      function draw(time, deltaTime = 0) {
         ctx.clearRect(0, 0, width, height);
-        const speedAboveThreshold = Math.max(
-          0,
-          Math.abs(scrollVelocity) - CONFIG.trailSpeedThreshold
-        );
-        const speedRatio = clamp(
-          speedAboveThreshold / (CONFIG.maxScrollSpeed - CONFIG.trailSpeedThreshold),
-          0,
-          1
-        );
+        const motionX = travelVelocityX + scrollVelocity * travelDirectionX;
+        const motionY = travelVelocityY - scrollVelocity * travelDirectionY;
+        const motionZ = travelVelocityZ + scrollVelocity / CONFIG.autoTravelSpeed * CONFIG.autoTravelDepthRate * travelDirectionZ;
+        const isMoving = deltaTime > 0 && (motionX !== 0 || motionY !== 0 || motionZ !== 0);
         for (let index = 0; index < stars.length; index += 1) {
-          prepareStarFrame(stars[index], time, speedAboveThreshold, speedRatio);
+          prepareStarFrame(stars[index], time, deltaTime, motionX, motionY, motionZ, isMoving);
         }
-        if (speedAboveThreshold > 0) drawTrailPass();
+        if (isMoving) drawTrailPass();
         drawCorePass();
       }
 
@@ -357,25 +516,24 @@
         targetScrollVelocity *= Math.exp(-CONFIG.scrollFriction * deltaTime);
         if (Math.abs(targetScrollVelocity) < 0.5) targetScrollVelocity = 0;
         if (targetScrollVelocity === 0 && Math.abs(scrollVelocity) < 0.5) scrollVelocity = 0;
-        scrollOffset += scrollVelocity * deltaTime;
+        const targetX = autoTravel ? travelDirectionX * CONFIG.autoTravelSpeed : 0;
+        const targetY = autoTravel ? -travelDirectionY * CONFIG.autoTravelSpeed : 0;
+        const targetZ = autoTravel ? travelDirectionZ * CONFIG.autoTravelDepthRate : 0;
+        travelVelocityX += (targetX - travelVelocityX) * velocityBlend;
+        travelVelocityY += (targetY - travelVelocityY) * velocityBlend;
+        travelVelocityZ += (targetZ - travelVelocityZ) * velocityBlend;
+        if (Math.abs(travelVelocityX - targetX) < 0.5) travelVelocityX = targetX;
+        if (Math.abs(travelVelocityY - targetY) < 0.5) travelVelocityY = targetY;
+        if (Math.abs(travelVelocityZ - targetZ) < 0.001) travelVelocityZ = targetZ;
 
-        if (Math.abs(scrollOffset) > height * 100) {
-          for (let index = 0; index < stars.length; index += 1) {
-            const star = stars[index];
-            star.y = wrap(star.y + scrollOffset * star.depth, height);
-            star.ny = star.y / height;
-          }
-          scrollOffset = 0;
-        }
-
-        const isMoving =
-          Math.abs(scrollVelocity) > CONFIG.trailSpeedThreshold ||
-          Math.abs(targetScrollVelocity) > CONFIG.trailSpeedThreshold;
+        const hasScrollMotion = scrollVelocity !== 0 && (travelDirectionX !== 0 || travelDirectionY !== 0 || travelDirectionZ !== 0);
+        const isMoving = hasScrollMotion || travelVelocityX !== 0 || travelVelocityY !== 0 || travelVelocityZ !== 0;
         const idleFps = width <= 1280
           ? CONFIG.tabletIdleFps
           : CONFIG.desktopIdleFps;
         if (isMoving || time - lastDrawTime >= 1000 / idleFps) {
-          draw(time);
+          const drawDelta = isMoving ? deltaTime : Math.min(time - lastDrawTime, 50) / 1000;
+          draw(time, drawDelta);
           lastDrawTime = time;
         }
         animationId = requestAnimationFrame(animate);
@@ -387,10 +545,36 @@
         return event.deltaY;
       }
 
+      function setAutoTravel(active) {
+        if (active === autoTravel) return;
+        autoTravel = active;
+        autoTravelButton.setAttribute('aria-pressed', String(active));
+        travelIcon.textContent = active ? 'Ⅱ' : '▶';
+        if (active) targetScrollVelocity = 0;
+      }
+
+      function readTravelDirection() {
+        const [x, y, z] = travelAxes.map(({ input, display }) => {
+          display.textContent = input.value;
+          return Number(input.value) / 100;
+        });
+        const magnitude = Math.max(1, Math.hypot(x, y, z));
+        travelDirectionX = x / magnitude;
+        travelDirectionY = y / magnitude;
+        travelDirectionZ = z / magnitude;
+      }
+
+      autoTravelButton.addEventListener('click', () => setAutoTravel(!autoTravel));
+      for (const { input } of travelAxes) input.addEventListener('input', readTravelDirection);
+      readTravelDirection();
+
       window.addEventListener('wheel', (event) => {
+        if (event.target instanceof Element && event.target.closest('.travel-controls')) return;
         const delta = clamp(normalizeWheelDelta(event), -1200, 1200);
+        if (delta === 0) return;
+        setAutoTravel(false);
         targetScrollVelocity = clamp(
-          targetScrollVelocity - delta * CONFIG.wheelImpulse,
+          targetScrollVelocity + delta * CONFIG.wheelImpulse,
           -CONFIG.maxScrollSpeed,
           CONFIG.maxScrollSpeed
         );
@@ -406,8 +590,9 @@
       canvas.addEventListener('pointermove', (event) => {
         if (event.pointerType !== 'touch' || !canvas.hasPointerCapture(event.pointerId)) return;
         const elapsed = Math.max((event.timeStamp - touchTime) / 1000, 1 / 120);
+        if (event.clientY !== touchY) setAutoTravel(false);
         targetScrollVelocity = clamp(
-          (event.clientY - touchY) / elapsed,
+          (touchY - event.clientY) / elapsed,
           -CONFIG.maxScrollSpeed,
           CONFIG.maxScrollSpeed
         );
@@ -426,6 +611,9 @@
           animationId = 0;
           scrollVelocity = 0;
           targetScrollVelocity = 0;
+          travelVelocityX = 0;
+          travelVelocityY = 0;
+          travelVelocityZ = 0;
         } else if (!animationId) {
           lastTime = 0;
           animationId = requestAnimationFrame(animate);
